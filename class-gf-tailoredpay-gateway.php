@@ -148,7 +148,16 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 		}
 
 		// --- IMPROVEMENT: Check for final status before processing ---
-		if ( in_array( rgar( $entry, 'payment_status' ), array( 'Paid', 'Failed', 'Refunded' ), true ) ) {
+		if ( in_array( rgar( $entry, 'payment_status' ), array( 'Paid', 'Failed' ), true ) ) {
+			try {
+				$webhook_transaction_id = rgar( $event_body, 'transaction_id' );
+				$payment_method_details = rgar( $event_body, 'card' );
+				if ( is_array( $payment_method_details ) && ! empty( $payment_method_details ) && ! empty( $webhook_transaction_id ) ) {
+					$this->save_card_digits_with_validation( $entry, $payment_method_details, $webhook_transaction_id );
+				}
+			} catch ( Exception $e ) {
+				error_log( 'ConvesioPay: Error in paid entry card validation: ' . $e->getMessage() );
+			}
 			return new WP_REST_Response(
 				array(
 					'status'  => 'success',
@@ -158,42 +167,60 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 			);
 		}
 
-		$transaction_id = rgar( $event_body, 'transaction_id' );
-		$amount         = rgar( $event_body['action'], 'amount', rgar( $entry, 'payment_amount' ) );
-		$response_text  = rgar( $event_body['action'], 'response_text' );
-
-		switch ( $event_type ) {
-			case 'transaction.sale.success':
-				$this->complete_payment(
-					$entry,
-					array(
-						'type'           => 'complete_payment',
-						'transaction_id' => $transaction_id,
-						'amount'         => $amount,
-						'payment_date'   => gmdate( 'Y-m-d H:i:s' ),
-					)
-				);
-				$this->add_note( $entry_id, 'Payment confirmed via webhook.' );
-				break;
-
-			case 'transaction.sale.failure':
-				// --- FIX: Create a detailed failure note for webhook ---
-				$note = sprintf(
-					'Payment failure via webhook. Amount: %1$s. Transaction ID: %2$s. Reason: %3$s',
-					GFCommon::to_money( $amount, $entry['currency'] ),
-					$transaction_id,
-					$response_text
-				);
-				$this->fail_payment(
-					$entry,
-					array(
-						'transaction_id' => $transaction_id,
-						'amount'         => $amount,
-						'note'           => $note,
-					)
-				);
-				break;
+		$feed = $this->get_payment_feed( $entry );
+		if ( ! $feed ) {
+			error_log( 'ConvesioPay: Feed not found for entry ' . $entry_id );
+			return new WP_Error( 'feed_not_found', 'Feed not found', array( 'status' => 404 ) );
 		}
+
+		$this->save_card_digits_to_field_from_webhook_safe( $event_body, $entry_id );
+		$action = $this->process_webhook_action( $event_body, $feed, $entry );
+		if ( is_wp_error( $action ) ) {
+			error_log( 'ConvesioPay: Error processing webhook action: ' . $action->get_error_message() );
+			return $action;
+		}
+			$result = $this->convesiopay_process_callback_action( $action );
+		if ( is_wp_error( $result ) ) {
+			error_log( 'ConvesioPay: Error processing callback action: ' . $result->get_error_message() );
+			return $result;
+		}
+
+		// $transaction_id = rgar( $event_body, 'transaction_id' );
+		// $amount         = rgar( $event_body['action'], 'amount', rgar( $entry, 'payment_amount' ) );
+		// $response_text  = rgar( $event_body['action'], 'response_text' );
+
+		// switch ( $event_type ) {
+		// 	case 'transaction.sale.success':
+		// 		$this->complete_payment(
+		// 			$entry,
+		// 			array(
+		// 				'type'           => 'complete_payment',
+		// 				'transaction_id' => $transaction_id,
+		// 				'amount'         => $amount,
+		// 				'payment_date'   => gmdate( 'Y-m-d H:i:s' ),
+		// 			)
+		// 		);
+		// 		$this->add_note( $entry_id, 'Payment confirmed via webhook.' );
+		// 		break;
+
+		// 	case 'transaction.sale.failure':
+		// 		// --- FIX: Create a detailed failure note for webhook ---
+		// 		$note = sprintf(
+		// 			'Payment failure via webhook. Amount: %1$s. Transaction ID: %2$s. Reason: %3$s',
+		// 			GFCommon::to_money( $amount, $entry['currency'] ),
+		// 			$transaction_id,
+		// 			$response_text
+		// 		);
+		// 		$this->fail_payment(
+		// 			$entry,
+		// 			array(
+		// 				'transaction_id' => $transaction_id,
+		// 				'amount'         => $amount,
+		// 				'note'           => $note,
+		// 			)
+		// 		);
+		// 		break;
+		// }
 
 		return new WP_REST_Response( array( 'status' => 'success' ), 200 );
 	}
@@ -271,6 +298,248 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 			),
 		);
 	}
+	
+
+	private function save_card_digits_with_validation( $entry, $card_data, $webhook_transaction_id ) {
+		// Safety checks
+		if ( ! is_array( $entry ) || ! is_array( $card_data ) || empty( $webhook_transaction_id ) ) {
+			error_log( 'ConvesioPay: Invalid parameters passed to save_card_digits_with_validation' );
+			return false;
+		}
+
+		$entry_id             = rgar( $entry, 'id' );
+		$entry_transaction_id = rgar( $entry, 'transaction_id' );
+
+		if ( empty( $entry_id ) || empty( $entry_transaction_id ) ) {
+			error_log( 'ConvesioPay: Missing entry ID or transaction ID for validation' );
+			return false;
+		}
+
+		// Check if transaction IDs match
+		if ( $webhook_transaction_id !== $entry_transaction_id ) {
+			error_log( 'ConvesioPay: Transaction ID mismatch for entry ' . $entry_id . '. Webhook: ' . $webhook_transaction_id . ', Entry: ' . $entry_transaction_id );
+			return false;
+		}
+
+		// Use base function to save
+		return $this->save_card_digits_to_field( $entry, $card_data );
+	}
+
+
+	private function save_card_digits_to_field( $entry, $card_data ) {
+		// Safety checks
+		if ( ! is_array( $entry ) || ! is_array( $card_data ) ) {
+			error_log( 'ConvesioPay: Invalid parameters passed to save_card_digits_to_field' );
+			return false;
+		}
+
+		$entry_id = rgar( $entry, 'id' );
+		$last4    = substr(rgar( $card_data, 'cc_number' ),-4);
+
+		if ( empty( $entry_id ) || empty( $last4 ) ) {
+			error_log( 'ConvesioPay: Missing entry ID or lastFour for card saving' );
+			return false;
+		}
+
+		$form_id = rgar( $entry, 'form_id' );
+		if ( empty( $form_id ) ) {
+			error_log( 'ConvesioPay: Missing form ID for entry ' . $entry_id );
+			return false;
+		}
+
+		$form = GFAPI::get_form( $form_id );
+		if ( ! $form || is_wp_error( $form ) || empty( $form['fields'] ) ) {
+			error_log( 'ConvesioPay: Form not found or invalid for entry ' . $entry_id );
+			return false;
+		}
+
+		// Find the field labeled "Card Last 4 Digits"
+		$field_id = null;
+		foreach ( $form['fields'] as $field ) {
+			if ( is_object( $field ) && stripos( $field->label, 'Card Last 4 Digits' ) !== false ) {
+				$field_id = $field->id;
+				break;
+			}
+		}
+
+		if ( ! $field_id ) {
+			error_log( 'ConvesioPay: Card Last 4 Digits field not found for form ' . $form_id );
+			return false;
+		}
+
+		$result = GFAPI::update_entry_field( $entry_id, $field_id, sanitize_text_field( $last4 ) );
+
+		if ( is_wp_error( $result ) ) {
+			error_log( 'ConvesioPay: Failed to update card digits field: ' . $result->get_error_message() );
+			return false;
+		}
+
+		error_log( 'ConvesioPay: Successfully saved last4 (' . $last4 . ') into field ' . $field_id . ' for entry ' . $entry_id );
+		return true;
+	}
+	private function convesiopay_process_callback_action( $action ) {
+		error_log( 'ConvesioPay Callback Action: ' . print_r( $action, true ) );
+
+		$action = wp_parse_args(
+			$action,
+			array(
+				'type'             => false,
+				'amount'           => false,
+				'transaction_type' => false,
+				'transaction_id'   => false,
+				'entry_id'         => false,
+				'payment_status'   => false,
+				'note'             => false,
+			)
+		);
+
+		$result = false;
+
+		if ( rgar( $action, 'id' ) && $this->is_duplicate_callback( $action['id'] ) ) {
+			return new WP_Error( 'duplicate', sprintf( esc_html__( 'This callback has already been processed (Event Id: %s)', 'gravityforms' ), $action['id'] ) );
+		}
+
+		$entry = GFAPI::get_entry( $action['entry_id'] );
+		if ( ! $entry || is_wp_error( $entry ) ) {
+			error_log( 'ConvesioPay: Entry not found for callback action. Entry ID: ' . rgar( $action, 'entry_id' ) );
+			return $result;
+		}
+
+		$form = GFAPI::get_form( $entry['form_id'] );
+		do_action( 'gform_action_pre_payment_callback', $action, $entry );
+
+		switch ( $action['type'] ) {
+			case 'complete_payment':
+				if ( 'Paid' === rgar( $entry, 'payment_status' ) ) {
+					break;
+				}
+				$result = $this->complete_payment( $entry, $action );
+				// GFAPI::send_notifications( $form, $entry, 'convesiopay_complete_payment' );
+				break;
+
+			case 'fail_payment':
+				if ( 'Failed' === rgar( $entry, 'payment_status' ) ) {
+					$result = true;
+					break;
+				}
+				$result = $this->fail_payment( $entry, $action );
+				// GFAPI::send_notifications( $form, $entry, 'convesiopay_fail_payment' );
+				break;
+
+			case 'add_pending_payment':
+				if ( 'Processing' === rgar( $entry, 'payment_status' ) || 'Pending' === rgar( $entry, 'payment_status' ) ) {
+					break;
+				}
+				$result = $this->add_pending_payment( $entry, $action );
+				// GFAPI::send_notifications( $form, $entry, 'convesiopay_add_pending_payment' );
+				break;
+		}
+
+		if ( rgar( $action, 'id' ) && $result ) {
+			$this->register_callback( $action['id'], $action['entry_id'] );
+		}
+
+		do_action( 'gform_post_payment_callback', $entry, $action, $result );
+
+		return $result;
+	}
+
+	/**
+	 * Safe wrapper for webhook card saving with error handling.
+	 *
+	 * @param array $payload  Webhook payload.
+	 * @param int   $entry_id Entry ID.
+	 * @return void
+	 */
+
+	private function save_card_digits_to_field_from_webhook_safe( $payload, $entry_id = null ) {
+		try {
+			$this->save_card_digits_to_field_from_webhook( $payload, $entry_id );
+		} catch ( Exception $e ) {
+			error_log( 'ConvesioPay: Error in webhook card saving: ' . $e->getMessage() );
+		}
+	}
+	/**
+	 * Save card digits from webhook payload (for fresh entries).
+	 *
+	 * @param array $payload  Webhook payload.
+	 * @param int   $entry_id Entry ID.
+	 * @return void
+	 */
+	private function save_card_digits_to_field_from_webhook( $payload, $entry_id = null ) {
+		// Safety checks
+		if ( ! is_array( $payload ) || empty( $entry_id ) || ! is_numeric( $entry_id ) ) {
+			error_log( 'ConvesioPay: Invalid parameters passed to save_card_digits_to_field_from_webhook' );
+			return;
+		}
+
+		$entry = GFAPI::get_entry( $entry_id );
+		if ( is_wp_error( $entry ) || ! is_array( $entry ) ) {
+			error_log( 'ConvesioPay: Entry not found or invalid for ID: ' . $entry_id );
+			return;
+		}
+
+		$payment_method_details = rgar( $payload, 'card' );
+		if ( is_array( $payment_method_details ) && ! empty( $payment_method_details ) ) {
+			$this->save_card_digits_to_field( $entry, $payment_method_details );
+		} else {
+			error_log( 'ConvesioPay: No payment method details found in webhook payload for entry ' . $entry_id );
+		}
+	}
+
+	/**
+	 * Process webhook action based on payment status.
+	 *
+	 * @param array $payload Webhook payload.
+	 * @param array $feed    Payment feed.
+	 * @param array $entry   Entry object.
+	 * @return array|WP_Error
+	 */
+	public function process_webhook_action( $payload, $feed, $entry ) {
+		error_log( 'ConvesioPay Webhook Action: ' . print_r( $payload, true ) );
+
+		$transaction_id = rgar( $payload, 'transaction_id' );
+		$status         = strtolower( rgar( $payload, 'condition' ) );
+		$amount         = rgar( $payload, 'requested_amount' );
+		$currency       = rgar( $payload, 'currency' );
+
+		$action                   = array();
+		$action['id']             = $transaction_id . '_' . time();
+		$action['entry_id']       = $entry['id'];
+		$action['transaction_id'] = $transaction_id;
+		$action['amount']         = $this->get_amount_import( $amount, $currency );
+		$action['payment_method'] = $this->_slug;
+
+		switch ( $status ) {
+			case 'pendingsettlement':
+				$action['type']             = 'complete_payment';
+				$action['payment_date']     = gmdate( 'y-m-d H:i:s' );
+				$action['note']             = 'Payment completed via webhook. Transaction ID: ' . $transaction_id;
+				$action['ready_to_fulfill'] = ! $entry['is_fulfilled'];
+				break;
+
+			case 'failed':
+			case 'blocked':
+			case 'cancelled':
+			case 'refunded':
+			case 'disputed':
+				$action['type']          = 'fail_payment';
+				$action['note']          = 'Payment failed via webhook. Status: ' . ucfirst( $status ) . '. Transaction ID: ' . $transaction_id;
+				$action['error_message'] = 'The payment status was updated to: ' . ucfirst( $status );
+				break;
+
+			case 'pending':
+				$action['type'] = 'convesiopay_add_pending_payment';
+				$action['note'] = 'Payment is pending via webhook. Transaction ID: ' . $transaction_id;
+				break;
+
+			default:
+				return new WP_Error( 'unhandled_status', 'Unhandled webhook status', array( 'status' => 400 ) );
+		}
+
+		return $action;
+	}
+
 
 	public function redirect_url( $feed, $submission_data, $form, $entry ) {
 		GFAPI::update_entry_property( $entry['id'], 'payment_status', 'Processing' );
@@ -463,6 +732,7 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 			'zip'                      => rgar( $billing_info, 'zip' ),
 			'country'                  => rgar( $billing_info, 'country' ),
 			'email'                    => rgar( $billing_info, 'email' ),
+			'test_mode'				   => 'enabled',
 		);
 
 		$request_data = array_filter( $request_data );
