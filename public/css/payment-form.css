@@ -1,0 +1,94 @@
+.tailoredpay-payment-container {
+    max-width: 500px;
+    margin: 0 auto;
+    padding: 20px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.tailoredpay-payment-container h3 {
+    text-align: center;
+    margin-bottom: 20px;
+    color: #333;
+}
+
+.payment-amount {
+    text-align: center;
+    font-size: 18px;
+    font-weight: bold;
+    margin-bottom: 30px;
+    color: #2c5aa0;
+}
+
+.payment-form {
+    margin-bottom: 20px;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+    color: #333;
+}
+
+.form-group > div {
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 10px;
+    min-height: 20px;
+    background: #fff;
+}
+
+.form-group > div:focus-within {
+    border-color: #2c5aa0;
+    box-shadow: 0 0 0 2px rgba(44, 90, 160, 0.2);
+}
+
+.pay-button {
+    width: 100%;
+    padding: 15px;
+    background: #2c5aa0;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+.pay-button:hover:not(:disabled) {
+    background: #1e3f73;
+}
+
+.pay-button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+.payment-errors {
+    margin-top: 15px;
+}
+
+.payment-errors .error {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 10px;
+    border: 1px solid #f5c6cb;
+    border-radius: 4px;
+}
+
+.payment-processing {
+    text-align: center;
+    padding: 15px;
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    border-radius: 4px;
+    margin-top: 15px;
+}
