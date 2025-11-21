@@ -1,27 +1,79 @@
-jQuery(document).ready(function($) {
-    // This function will wait until the CollectJS object is available
+jQuery(document).ready(function ($) {
+    const termsCheckbox = $('#tailoredpay-terms-agreement');
+    const initialLoader = $("#tailoredpay-initial-loader");
+    let fieldsReady = false;
+    let fieldValidation = {
+        ccnumber: false,
+        ccexp: false,
+        cvv: false
+    };
+
+    $('#payButton').prop('disabled', true);
+    $('#tailoredpay-terms-agreement').prop('disabled', true).prop('checked', false);
+
+    function hideInitialLoader() {
+        initialLoader.fadeOut(200, function () {
+            $(this).remove();
+        });
+    }
+
+    function showError(message) {
+        $('#tailoredpay-js-errors')
+            .html('<strong>Error:</strong> ' + message)
+            .fadeIn(300);
+    }
+
+    function hideError() {
+        $('#tailoredpay-js-errors').fadeOut(200, function () {
+            $(this).html('');
+        });
+    }
+
     function initializeTailoredPay() {
         if (typeof CollectJS === 'undefined' || typeof tailoredpay_vars === 'undefined') {
             console.error('TailoredPay Error: Required variables or CollectJS object not found.');
-            $('#payment-errors').html('<div class="error">A critical error occurred. Please contact support.</div>').show();
+            showError('A critical error occurred. Please refresh the page.');
+            hideInitialLoader();
             return;
         }
+
         console.log('✅ tailoredpay_vars and CollectJS are loaded.');
 
-        // FIX: The CollectJS object is already partially configured by the HTML.
-        // We now just add our callback functions to it.
         CollectJS.configure({
+            'variant': 'inline',
+            'invalidCss': {
+                'color': '#c33',
+                'border': '1px solid #fcc'
+            },
+            'validCss': {
+                'color': '#28a745',
+                'border': '1px solid #28a745'
+            },
+            'focusCss': {
+                'border': '1px solid #4CAF50'
+            },
             'fieldsAvailableCallback': function () {
                 console.log('✅ CollectJS fields are available.');
-                $('#payButton').prop('disabled', false); // Enable the pay button
+                hideInitialLoader();
+                fieldsReady = true;
+                $('#tailoredpay-terms-agreement').prop('disabled', false);
+                $('#payButton').prop('disabled', false); // Enable button by default
             },
-            'callback': function(response) {
+            'validationCallback': function (field, status, message) {
+                fieldValidation[field] = status;
+                console.log('Field validation:', field, status);
+            },
+            'callback': function (response) {
                 console.log('💳 Token received:', response.token);
-                var token = response.token;
 
-                $('#payment-processing').show();
-                $('#payButton').prop('disabled', true);
-                $('#payment-errors').hide();
+                // Re-validate checkbox before processing payment
+                if (!termsCheckbox.is(':checked')) {
+                    showError('Please accept the terms and conditions to continue.');
+                    $('#payButton').prop('disabled', false).text('Complete Your Order');
+                    return;
+                }
+
+                hideError();
 
                 $.ajax({
                     url: tailoredpay_vars.ajaxUrl,
@@ -30,52 +82,109 @@ jQuery(document).ready(function($) {
                         action: 'tailoredpay_process_payment',
                         nonce: tailoredpay_vars.nonce,
                         entry_id: tailoredpay_vars.entryId,
-                        payment_token: token
+                        payment_token: response.token
                     },
-                    success: function(ajax_response) {
+                    success: function (ajax_response) {
                         if (ajax_response.success) {
                             console.log('✅ Payment successful. Redirecting...');
                             if (ajax_response.data.redirect_url) {
                                 window.location.href = ajax_response.data.redirect_url;
                             } else {
-                                $('#payment-processing').text('Payment successful! Your order is complete.');
+                                showError('Payment successful! Your order is complete.');
                             }
                         } else {
-                            console.error('❌ Server returned an error:', ajax_response.data);
-                            $('#payment-errors').html('<div class="error">' + ajax_response.data + '</div>').show();
-                            $('#payment-processing').hide();
-                            $('#payButton').prop('disabled', false);
+                            var errorMsg = ajax_response.data || 'Payment failed. Please try again.';
+                            showError(errorMsg);
+                            $('#payButton').prop('disabled', false).text('Complete Your Order');
                         }
                     },
-                    error: function(jqXHR) {
-                        var errorMessage = 'An unknown AJAX error occurred. Please try again.';
+                    error: function (jqXHR) {
+                        var errorMessage = 'Payment processing failed. Please try again.';
                         if (jqXHR.responseJSON && jqXHR.responseJSON.data) {
                             errorMessage = jqXHR.responseJSON.data;
                         }
-                        console.error('❌ AJAX request failed:', errorMessage);
-                        $('#payment-errors').html('<div class="error">' + errorMessage + '</div>').show();
-                        $('#payment-processing').hide();
-                        $('#payButton').prop('disabled', false);
+                        showError(errorMessage);
+                        $('#payButton').prop('disabled', false).text('Complete Your Order');
                     }
                 });
+            },
+            'timeoutCallback': function () {
+                showError('Payment request timed out. Please try again.');
+                $('#payButton').prop('disabled', false).text('Complete Your Order');
             }
         });
 
-        // The click handler remains the same
-        $('#payButton').on('click', function(e) {
+        $('#payButton').on('click', function (e) {
             e.preventDefault();
-            console.log('🚀 Pay button clicked - starting tokenization process...');
+            hideError();
+
+            if (!fieldsReady) {
+                showError('Payment system is still loading. Please wait.');
+                return;
+            }
+
+            if (!termsCheckbox.is(':checked')) {
+                showError('Please accept the terms and conditions to continue.');
+                // Highlight the checkbox
+                termsCheckbox.closest('.tailoredpay-terms-checkbox-container').css('border', '2px solid #c33');
+                setTimeout(function () {
+                    termsCheckbox.closest('.tailoredpay-terms-checkbox-container').css('border', '');
+                }, 2000);
+                return;
+            }
+
+            if (!fieldValidation.ccnumber) {
+                showError('Please enter a valid card number.');
+                return;
+            }
+
+            if (!fieldValidation.ccexp) {
+                showError('Please enter a valid expiry date (MM/YY).');
+                return;
+            }
+
+            if (!fieldValidation.cvv) {
+                showError('Please enter a valid CVV code.');
+                return;
+            }
+
+            console.log('🚀 Starting payment...');
+
+            // Disable button and checkbox immediately to prevent changes
+            $(this).prop('disabled', true).text('Processing Payment...');
+            termsCheckbox.prop('disabled', true);
+
             CollectJS.startPaymentRequest();
         });
 
-        console.log('✅ TailoredPay JS initialization complete!');
+        // Add this after the $('#payButton').on('click'...) handler
+
+        termsCheckbox.on('change', function () {
+            if ($(this).is(':checked') && fieldsReady) {
+                $('#payButton').prop('disabled', false);
+            } else {
+                $('#payButton').prop('disabled', true);
+            }
+        });
+
+        console.log('✅ TailoredPay initialization complete!');
     }
 
-    // Poll to check if CollectJS is available, since it loads asynchronously.
-    var checkCollectJS = setInterval(function() {
+    // Reduced polling interval and timeout
+    var checkAttempts = 0;
+    var maxAttempts = 50; // 5 seconds max wait
+
+    var checkCollectJS = setInterval(function () {
+        checkAttempts++;
+
         if (typeof CollectJS !== 'undefined') {
             clearInterval(checkCollectJS);
             initializeTailoredPay();
+        } else if (checkAttempts >= maxAttempts) {
+            clearInterval(checkCollectJS);
+            hideInitialLoader();
+            showError('Payment system failed to load. Please refresh the page.');
+            console.error('CollectJS failed to load within timeout period');
         }
-    }, 100); // Check every 100ms
+    }, 100);
 });

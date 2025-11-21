@@ -558,31 +558,67 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 		$pageURL .= $_SERVER['REQUEST_URI'];
 
 		$ids_query  = "ids={$form_id}|{$entry_id}";
-		$ids_query .= '&hash=' . wp_hash( $ids_query );
-		return add_query_arg( 'gf_tailoredpay_return', base64_encode( $ids_query ), $pageURL );
+		$ids_query .= '&hash=' . wp_hash($ids_query);
+		return add_query_arg('gf_tailoredpay_return', base64_encode($ids_query), $pageURL);
 	}
 
-	public function maybe_process_tailoredpay_page() {
-		$str = rgget( 'gf_tailoredpay_return' );
-		if ( ! $str ) {
+	public function maybe_process_tailoredpay_page()
+	{
+		$str = rgget('gf_tailoredpay_return');
+		if (! $str) {
 			return;
 		}
 
-		$str = base64_decode( $str );
-		parse_str( $str, $query );
+		// Decode and validate the hash.
+		$str = base64_decode($str);
+		parse_str($str, $query);
 
-		if ( wp_hash( 'ids=' . $query['ids'] ) !== $query['hash'] ) {
+		if (! isset($query['ids'], $query['hash'])) {
 			return;
 		}
 
-		list( $form_id, $entry_id ) = explode( '|', $query['ids'] );
-		$form                       = GFAPI::get_form( $form_id );
-		$entry                      = GFAPI::get_entry( $entry_id );
-
-		if ( ! $form || ! $entry ) {
+		if (wp_hash('ids=' . $query['ids']) !== $query['hash']) {
+			// Invalid / tampered return URL.
 			return;
 		}
 
+		list($form_id, $entry_id) = explode('|', $query['ids']);
+
+		$form  = GFAPI::get_form($form_id);
+		$entry = GFAPI::get_entry($entry_id);
+
+		if (! $form || is_wp_error($entry)) {
+			return;
+		}
+
+		// ✅ NEW: If the payment is already marked as Paid, show the confirmation / thank-you page.
+		// $payment_status = rgar($entry, 'payment_status');
+
+		if ('Paid' === $payment_status) {
+			if (! class_exists('GFFormDisplay')) {
+				require_once GFCommon::get_base_path() . '/form_display.php';
+			}
+
+			$confirmation = GFFormDisplay::handle_confirmation($form, $entry, false);
+
+			// If the confirmation is a redirect, send the user there.
+			if (is_array($confirmation) && isset($confirmation['redirect'])) {
+				wp_redirect($confirmation['redirect']);
+				exit;
+			}
+
+			// Otherwise, show the confirmation message on the same page.
+			GFFormDisplay::$submission[$form_id] = array(
+				'is_confirmation'      => true,
+				'confirmation_message' => $confirmation,
+				'form'                 => $form,
+				'lead'                 => $entry,
+			);
+
+			return;
+		}
+
+		// ❗ Not paid yet → load the TailoredPay payment form via the_content filter.
 		$this->is_payment_page_load = true;
 		$this->payment_page_form    = $form;
 		$this->payment_page_entry   = $entry;
@@ -598,23 +634,26 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 		}
 
 		$this->is_payment_page_load = false;
-		return $this->render_payment_form( $this->payment_page_form, $this->payment_page_entry );
+		return $this->render_payment_form($this->payment_page_form, $this->payment_page_entry);
 	}
 
-	public function render_payment_form( $form, $entry ) {
+	public function render_payment_form($form, $entry)
+	{
 		$settings        = $this->get_plugin_settings();
-		$submission_data = gform_get_meta( $entry['id'], 'submission_data' );
+		$submission_data = gform_get_meta($entry['id'], 'submission_data');
 
-		if ( empty( $submission_data ) ) {
+		$error_message = $this->payment_page_error;
+
+		if (empty($submission_data)) {
 			return '<p>Error: Payment session not found.</p>';
 		}
 
-		$environment      = rgar( $settings, 'environment', 'test' );
+		$environment      = rgar($settings, 'environment', 'test');
 		$tokenization_key = $environment === 'live'
-		? rgar( $settings, 'live_tokenization_key' )
-		: rgar( $settings, 'test_tokenization_key' );
+			? rgar($settings, 'live_tokenization_key')
+			: rgar($settings, 'test_tokenization_key');
 
-		if ( empty( $tokenization_key ) ) {
+		if (empty($tokenization_key)) {
 			return '<p>Error: Tokenization key is not configured. Please check your TailoredPay settings.</p>';
 		}
 
@@ -647,73 +686,126 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 		);
 
 		ob_start();
-		?>
-	<div class="tailoredpay-payment-container">
-		<h3>Complete Your Payment</h3>
-		<div class="payment-amount">
-			Amount: $<?php echo esc_html( $submission_data['payment_amount'] ); ?>
-		</div>
+?>
+		<div class="tailoredpay-checkout-wrapper-main">
+			<div class="tailoredpay-custom-checkout-item-wrapper">
+				<!-- for header -->
+				<div class="tailoredpay-card-details-container">
+					<div class="tailoredpay-card-details-header">
+						<span class="tailoredpay-card-details-title">Card Details</span>
+						<div class="tailoredpay-secure-payment-section">
+							<span class="tailoredpay-secure-payment-text">SECURE PAYMENT</span>
+							<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Visa_Inc._logo.svg/2560px-Visa_Inc._logo.svg.png" alt="Visa" class="tailoredpay-payment-icon tailoredpay-visa">
+							<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/MasterCard_Logo.svg/2560px-MasterCard_Logo.svg.png" alt="Mastercard" class="tailoredpay-payment-icon tailoredpay-mastercard">
+							<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/40/JCB_logo.svg/1200px-JCB_logo.svg.png" alt="JCB" class="tailoredpay-payment-icon tailoredpay-jcb">
+							<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/f/fa/American_Express_logo_%282018%29.svg/1200px-American_Express_logo_%282018%29.svg.png" alt="American Express" class="tailoredpay-payment-icon tailoredpay-amex">
+						</div>
+					</div>
+				</div>
+				<div id="tailoredpay-checkout-payment-box" class="tailoredpay-checkout-payment-box">
+					<div id="tailoredpay-wrapper">
+						<!-- tailoredpay Form (iframe ki jagah) -->
+						<form id="tailoredpay-payment-form" method="POST" action="">
+							<div id="tailoredpay-component-container">
+								<script src="https://tailoredpay.transactiongateway.com/token/Collect.js"
+									data-tokenization-key="<?php echo esc_attr($tokenization_key); ?>"
+									data-variant="inline"></script>
+								<!-- FIX END -->
 
-		<!-- FIX START: Load Collect.js directly in the HTML with its required data attributes. -->
-		<!-- This script MUST come before the payment form divs. -->
-		<script src="https://tailoredpay.transactiongateway.com/token/Collect.js"
-				data-tokenization-key="<?php echo esc_attr( $tokenization_key ); ?>"
-				data-variant="inline"></script>
-		<!-- FIX END -->
+								<div class="payment-form">
+									<div class="form-group">
+										<label>Card Number</label>
+										<div id="ccnumber"></div>
+									</div>
+									<div class="form-row">
+										<div class="form-group">
+											<label>Expiry Date</label>
+											<div id="ccexp"></div>
+										</div>
+										<div class="form-group">
+											<label>CVV</label>
+											<div id="cvv"></div>
+										</div>
+									</div>
+								</div>
 
-		<div class="payment-form">
-			<div class="form-group">
-				<label>Card Number</label>
-				<div id="ccnumber"></div>
+								<div id="payment-errors" class="payment-errors"></div>
+								<!-- <div id="payment-processing" class="payment-processing" style="display:none;">
+									Processing payment...
+								</div> -->
+							</div>
+
+							<!-- Initial loader until JS initializes tailoredpay -->
+							<div id="tailoredpay-initial-loader" class="tailoredpay-initial-loader">
+								<div class="tailoredpay-spinner"></div>
+								<span>Processing your secure payment...</span>
+							</div>
+					</div>
+
+					<div class="tailoredpay-terms-checkbox-container">
+						<input type="checkbox" id="tailoredpay-terms-agreement" name="terms_agreement" data-gtm-form-interact-field-id="0">
+						<label for="tailoredpay-terms-agreement" class="tailoredpay-information-text">By authorizing the payment, I acknowledge that I am purchasing a third-party service not affiliated with any government agency, and I have reviewed and angree to the <a href="https://usimmigrationassistance.com/terms_of_service/">term and conditions</a> and <a href="https://usimmigrationassistance.com/privacy_policy/">privacy policy</a></label>
+					</div>
+					<button id="payButton" class="pay-button" disabled>Complete Your Order</button>
+					<div class="tailoredpay-payment-method-text">
+						<p>We use secure payment methods to protect your information.</p>
+					</div>
+					<div class="tailoredpay-payment-errors-custom">
+						<div id="tailoredpay-js-errors" class="tailoredpay-validation-error"></div>
+						<?php if (! empty($error_message)) : ?>
+							<div class="tailoredpay-validation-error" style="display: block;">
+								<?php echo esc_html($error_message); ?>
+							</div>
+						<?php endif; ?>
+					</div>
+					</form>
+
+					<div class="tailoredpay-note-section">
+						<label for="id_accept_terms" class="form-check-label">
+							I acknowledge that a private company will review and submit the ESTA application on my behalf, which includes the mandatory U.S. Government submission fee. I confirm that I am of legal age or have obtained parental/guardian consent to submit this application. I consent to the
+							<a href="https://usimmigrationassistance.com/privacy_policy/" target="_blank" class="policy-privacy">Privacy Policy</a> and
+							<a href="https://usimmigrationassistance.com/terms_of_service/" target="_blank" class="policy-terms">Terms &amp; Conditions</a>
+							of this website. The service charge of <strong>$<?php echo esc_html(rgar($entry, 'payment_amount')); ?></strong>
+							will appear on the statement as: US Immigration Assistance<br><br>
+							If you have any questions about your order or your upcoming trip to the USA, please contact us at: support@usimmigrationassistance.com
+						</label>
+					</div>
+				</div>
 			</div>
-			<div class="form-group">
-				<label>Expiry Date</label>
-				<div id="ccexp"></div>
-			</div>
-			<div class="form-group">
-				<label>CVV</label>
-				<div id="cvv"></div>
-			</div>
-			<button id="payButton" class="pay-button" disabled>Pay Now</button>
 		</div>
-		
-		<div id="payment-errors" class="payment-errors"></div>
-		<div id="payment-processing" class="payment-processing" style="display:none;">
-			Processing payment...
-		</div>
-	</div>
-		<?php
+<?php
 		return ob_get_clean();
 	}
 
-	public function handle_ajax_payment() {
-		if ( ! wp_verify_nonce( $_POST['nonce'], 'tailoredpay_payment' ) ) {
-			wp_send_json_error( 'Invalid nonce' );
+	public function handle_ajax_payment()
+	{
+		if (! wp_verify_nonce($_POST['nonce'], 'tailoredpay_payment')) {
+			wp_send_json_error('Invalid nonce');
 		}
 
-		$payment_token = sanitize_text_field( $_POST['payment_token'] );
-		$entry_id      = intval( $_POST['entry_id'] );
+		$payment_token = sanitize_text_field($_POST['payment_token']);
+		$entry_id      = intval($_POST['entry_id']);
 
-		$entry = GFAPI::get_entry( $entry_id );
-		if ( ! $entry ) {
-			wp_send_json_error( 'Entry not found' );
+		$entry = GFAPI::get_entry($entry_id);
+		if (! $entry) {
+			wp_send_json_error('Entry not found');
 		}
 
-		$submission_data = gform_get_meta( $entry_id, 'submission_data' );
-		if ( ! $submission_data ) {
-			wp_send_json_error( 'Submission data not found' );
+		$submission_data = gform_get_meta($entry_id, 'submission_data');
+		if (! $submission_data) {
+			wp_send_json_error('Submission data not found');
 		}
 
 		$settings     = $this->get_plugin_settings();
-		$environment  = rgar( $settings, 'environment', 'test' );
+		$environment  = rgar($settings, 'environment', 'test');
 		$security_key = $environment === 'live'
-		? rgar( $settings, 'live_security_key' )
-		: rgar( $settings, 'test_security_key' );
+			? rgar($settings, 'live_security_key')
+			: rgar($settings, 'test_security_key');
 
-		$billing_info = rgar( $submission_data, 'billing' );
+		$billing_info = rgar($submission_data, 'billing');
 
 		// --- FIX: Format the amount to two decimal places ---
-		$amount_formatted = number_format( (float) $submission_data['payment_amount'], 2, '.', '' );
+		$amount_formatted = number_format((float) $submission_data['payment_amount'], 2, '.', '');
 
 		$request_data = array(
 			'security_key'             => $security_key,
@@ -874,5 +966,6 @@ class GF_TailoredPay_Gateway extends GFPaymentAddOn {
 		$default_settings = $this->add_field_after( 'feedName', $transaction_type, $default_settings );
 
 		return apply_filters( 'gform_tailoredpay_feed_settings_fields', $default_settings, $this->get_current_form() );
+
 	}
 }
